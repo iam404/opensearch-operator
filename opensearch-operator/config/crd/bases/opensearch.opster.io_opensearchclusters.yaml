@@ -5310,6 +5310,8 @@ spec:
                             type: object
                         type: object
                     type: object
+                  disable:
+                    type: boolean
                   tls:
                     description: Configure tls usage for transport and http interface
                     properties:

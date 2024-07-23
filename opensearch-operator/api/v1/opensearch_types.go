@@ -224,8 +224,9 @@ type DashboardsTlsConfig struct {
 
 // Security defines options for managing the opensearch-security plugin
 type Security struct {
-	Tls    *TlsConfig      `json:"tls,omitempty"`
-	Config *SecurityConfig `json:"config,omitempty"`
+	Disable bool            `json:"disable,omitempty"`
+	Tls     *TlsConfig      `json:"tls,omitempty"`
+	Config  *SecurityConfig `json:"config,omitempty"`
 }
 
 // Configure tls usage for transport and http interface
