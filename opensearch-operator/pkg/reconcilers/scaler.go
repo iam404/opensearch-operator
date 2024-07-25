@@ -85,31 +85,61 @@ func (r *ScalerReconciler) reconcileNodePool(nodePool *opsterv1.NodePool) (bool,
 	comp := r.instance.Status.ComponentsStatus
 	currentStatus, found := helpers.FindFirstPartial(comp, componentStatus, helpers.GetByDescriptionAndComponent)
 
-	desireReplicaDiff := *currentSts.Spec.Replicas - nodePool.Replicas
-	if desireReplicaDiff == 0 {
-		// If a scaling operation was started before for this nodePool
-		if found {
-			err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
-				if currentSts.Status.ReadyReplicas != nodePool.Replicas {
-					// Change the status to waiting while the pods are coming up or getting deleted
-					componentStatus.Status = "Waiting"
-					instance.Status.ComponentsStatus = helpers.Replace(currentStatus, componentStatus, r.instance.Status.ComponentsStatus)
-				} else {
-					// Scaling operation is completed, remove the status
-					instance.Status.ComponentsStatus = helpers.RemoveIt(currentStatus, r.instance.Status.ComponentsStatus)
+	var desireReplicaDiff int32
+
+	if nodePool.Autoscaler != nil {
+		desireReplicaDiff = *currentSts.Spec.Replicas - r.instance.Status.Scaler[nodePool.Component].Replicas
+		fmt.Printf("desireReplicaDiff=%d %d %d", desireReplicaDiff, *currentSts.Spec.Replicas, r.instance.Status.Scaler[nodePool.Component].Replicas)
+
+		if desireReplicaDiff == 0 {
+			// If a scaling operation was started before for this nodePool
+			if found {
+				err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+					if currentSts.Status.ReadyReplicas != r.instance.Status.Scaler[nodePool.Component].Replicas {
+						// Change the status to waiting while the pods are coming up or getting deleted
+						componentStatus.Status = "Waiting"
+						instance.Status.ComponentsStatus = helpers.Replace(currentStatus, componentStatus, r.instance.Status.ComponentsStatus)
+					} else {
+						// Scaling operation is completed, remove the status
+						instance.Status.ComponentsStatus = helpers.RemoveIt(currentStatus, r.instance.Status.ComponentsStatus)
+					}
+				})
+				if err != nil {
+					lg.Error(err, "failed to update status")
+					return false, err
 				}
-			})
-			if err != nil {
-				lg.Error(err, "failed to update status")
-				return false, err
 			}
+			return false, nil
 		}
-		return false, nil
+
+	} else {
+		desireReplicaDiff = *currentSts.Spec.Replicas - nodePool.Replicas
+
+		if desireReplicaDiff == 0 {
+			// If a scaling operation was started before for this nodePool
+			if found {
+				err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+					if currentSts.Status.ReadyReplicas != nodePool.Replicas {
+						// Change the status to waiting while the pods are coming up or getting deleted
+						componentStatus.Status = "Waiting"
+						instance.Status.ComponentsStatus = helpers.Replace(currentStatus, componentStatus, r.instance.Status.ComponentsStatus)
+					} else {
+						// Scaling operation is completed, remove the status
+						instance.Status.ComponentsStatus = helpers.RemoveIt(currentStatus, r.instance.Status.ComponentsStatus)
+					}
+				})
+				if err != nil {
+					lg.Error(err, "failed to update status")
+					return false, err
+				}
+			}
+			return false, nil
+		}
 	}
 
 	// Check for 'Running' status as we set it to indicate the scaling operation has begun
 	// Also the status is set to 'Running' if it fails to exclude node for some reason
-	if !found || currentStatus.Status == "Running" {
+	if !found || currentStatus.Status == "Running" || currentStatus.Status == "Waiting" {
 		// Change the status to running, to indicate that a scaling operation for this nodePool has started
 		err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
 			instance.Status.ComponentsStatus = helpers.Replace(currentStatus, componentStatus, instance.Status.ComponentsStatus)

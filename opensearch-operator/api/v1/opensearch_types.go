@@ -129,6 +129,14 @@ type NodePool struct {
 	PriorityClassName         string                            `json:"priorityClassName,omitempty"`
 	Pdb                       *PdbConfig                        `json:"pdb,omitempty"`
 	Probes                    *ProbesConfig                     `json:"probes,omitempty"`
+	Autoscaler                *AutoscalerSpec                   `json:"autoscaler,omitempty"`
+}
+
+// AutoscalerSpec defines the desired state of the autoscaler
+type AutoscalerSpec struct {
+	MinReplicas                    int32 `json:"minReplicas"`
+	MaxReplicas                    int32 `json:"maxReplicas"`
+	TargetCPUUtilizationPercentage int64 `json:"targetCPUUtilizationPercentage"`
 }
 
 // PersistencConfig defines options for data persistence
@@ -343,8 +351,14 @@ type ClusterStatus struct {
 	Version          string            `json:"version,omitempty"`
 	Initialized      bool              `json:"initialized,omitempty"`
 	// AvailableNodes is the number of available instances.
-	AvailableNodes int32            `json:"availableNodes,omitempty"`
-	Health         OpenSearchHealth `json:"health,omitempty"`
+	AvailableNodes int32                   `json:"availableNodes,omitempty"`
+	Health         OpenSearchHealth        `json:"health,omitempty"`
+	Scaler         map[string]*ScaleStatus `json:"scaler,omitempty"`
+}
+
+type ScaleStatus struct {
+	LastScaleTime metav1.Time `json:"lastScaleTime,omitempty"`
+	Replicas      int32       `json:"replicas,omitempty"`
 }
 
 // +kubebuilder:object:root=true

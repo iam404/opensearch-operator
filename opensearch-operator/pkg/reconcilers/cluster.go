@@ -3,6 +3,15 @@ package reconcilers
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Opster/opensearch-k8s-operator/opensearch-operator/pkg/reconcilers/k8s"
@@ -254,6 +263,32 @@ func (r *ClusterReconciler) reconcileNodeStatefulSet(nodePool opsterv1.NodePool,
 		}
 	}
 
+	r.logger.Info("Starting autoscaler logic")
+	// Handle autoscaling logic
+	if nodePool.Autoscaler != nil {
+
+		if r.instance.Status.Scaler == nil || r.instance.Status.Scaler[nodePool.Component] == nil {
+
+			autoscalerStatus := map[string]*opsterv1.ScaleStatus{}
+			autoscalerStatus[nodePool.Component] = &opsterv1.ScaleStatus{
+				Replicas:      nodePool.Replicas,
+				LastScaleTime: r.instance.CreationTimestamp,
+			}
+			r.instance.Status.Scaler = autoscalerStatus
+
+			r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+				instance.Status.Scaler = autoscalerStatus
+			})
+
+		}
+
+		err := r.handleAutoscaling(&existing, nodePool)
+		if err != nil {
+			r.logger.Error(err, "Failing in autoscaler reconcile")
+		}
+
+	}
+
 	// Now set the desired replicas to be the existing replicas
 	// This will allow the scaler reconciler to function correctly
 	sts.Spec.Replicas = existing.Spec.Replicas
@@ -268,6 +303,92 @@ func (r *ClusterReconciler) reconcileNodeStatefulSet(nodePool opsterv1.NodePool,
 
 	// Finally we enforce the desired state
 	return r.client.ReconcileResource(sts, reconciler.StatePresent)
+}
+
+func (r *ClusterReconciler) handleAutoscaling(existing *appsv1.StatefulSet, nodePool opsterv1.NodePool) error {
+
+	fmt.Printf("in 1")
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		kubeconfig := os.Getenv("KUBECONFIG")
+		if kubeconfig == "" {
+			kubeconfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+		}
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+
+		klog.V(4).Infof("REST Config: Host: %s, APIPath: %s", config.Host, config.APIPath)
+	}
+	fmt.Printf("in 2")
+	metricsClient, err := metricsv.NewForConfig(config)
+	fmt.Printf("in 3")
+
+	componentReq, err := labels.NewRequirement(helpers.NodePoolLabel, selection.Equals, []string{nodePool.Component})
+	if err != nil {
+		return err
+	}
+	selector := labels.NewSelector()
+	selector = selector.Add(*componentReq)
+
+	podList, err := r.client.ListPods(&client.ListOptions{LabelSelector: selector})
+	// Calculate median CPU usage
+	podCount := len(podList.Items)
+	if podCount == 0 {
+		return fmt.Errorf("no pods found for StatefulSet %s", existing.Name)
+	}
+
+	var totalCPUUsage int64
+	var totalCPURequests int64
+
+	// Assuming you have a method to get pod metrics. If not, you'll need to implement this.
+	for _, pod := range podList.Items {
+		podMetrics, err := metricsClient.MetricsV1beta1().PodMetricses(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+
+			if errors.IsNotFound(err) {
+				fmt.Printf("Pod %s not found\n", pod.Name)
+				continue
+			}
+			return fmt.Errorf("failed to get metrics for pod %s: %w", pod.Name, err)
+		}
+		for _, container := range podMetrics.Containers {
+			totalCPUUsage += container.Usage.Cpu().MilliValue()
+			fmt.Printf("fetched metrics %d", totalCPUUsage)
+		}
+
+		for _, container := range pod.Spec.Containers {
+			if request, ok := container.Resources.Requests["cpu"]; ok {
+				totalCPURequests += request.MilliValue()
+			}
+		}
+
+	}
+
+	if totalCPURequests == 0 {
+		return fmt.Errorf("total CPU requests for StatefulSet %s is zero", existing.Name)
+	}
+
+	cpuCurrentUtilization := ((totalCPUUsage) / (totalCPURequests)) * 100
+
+	fmt.Printf("total metrics %d", cpuCurrentUtilization)
+	// Determine the target number of replicas
+	targetReplicas := *existing.Spec.Replicas
+	if cpuCurrentUtilization > nodePool.Autoscaler.TargetCPUUtilizationPercentage {
+		targetReplicas = int32(min(int(nodePool.Autoscaler.MaxReplicas), int(targetReplicas)+1))
+	} else if cpuCurrentUtilization < nodePool.Autoscaler.TargetCPUUtilizationPercentage {
+		targetReplicas = int32(max(int(nodePool.Autoscaler.MinReplicas), int(targetReplicas)-1))
+	}
+
+	if *existing.Spec.Replicas != targetReplicas {
+		fmt.Printf("Update required %d --> %d ", *existing.Spec.Replicas, targetReplicas)
+		//existing.Spec.Replicas = &targetReplicas
+		r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+			instance.Status.Scaler[nodePool.Component].Replicas = targetReplicas
+			instance.Status.Scaler[nodePool.Component].LastScaleTime = metav1.Now()
+		})
+
+	}
+
+	return nil
 }
 
 func (r *ClusterReconciler) DeleteResources() (ctrl.Result, error) {
